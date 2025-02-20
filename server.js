@@ -61,7 +61,7 @@ app.post("/create-payment", async (req, res) => {
                 unit_price: item.price
             })),
             external_reference: machine_id,
-            notification_url: `https://tu-backend.vercel.app/payment-webhook`
+            notification_url: `https://serv-vending.vercel.app/payment-webhook`
         };
 
         const response = await axios.post(
