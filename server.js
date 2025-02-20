@@ -73,10 +73,12 @@ app.post("/create-payment", async (req, res) => {
             // A chunk of data has been received.
             resp.on('data', (chunk) => {
                 data += chunk;
+                console.log("Chunk recibido:", chunk); // Depuración
             });
 
             // The whole response has been received.
             resp.on('end', async () => {
+                console.log("Respuesta completa recibida:", data); // Depuración
                 try {
                     const response = JSON.parse(data);
                     console.log("Respuesta de MercadoPago:", response); // Depuración
