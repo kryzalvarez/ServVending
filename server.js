@@ -1,10 +1,10 @@
 require("dotenv").config();
 const express = require("express");
-const https = require('https');
+const axios = require('axios');
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const admin = require("firebase-admin");
-//tyth
+
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
@@ -14,7 +14,7 @@ const MERCADOPAGO_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN;
 
 // Credenciales de Firebase desde variables de entorno
 const serviceAccount = {
-    type: "service_account",
+    type: process.env.FIREBASE_TYPE,
     project_id: process.env.FIREBASE_PROJECT_ID,
     private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
     private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
@@ -64,63 +64,34 @@ app.post("/create-payment", async (req, res) => {
             notification_url: `https://tu-backend.vercel.app/payment-webhook`
         };
 
-        const postData = JSON.stringify(preference);
-
-        const options = {
-            hostname: 'api.mercadopago.com',
-            path: '/checkout/preferences',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${MERCADOPAGO_ACCESS_TOKEN}`,
-                'Content-Length': postData.length
-            }
-        };
-
-        const reqMercadoPago = https.request(options, (resp) => {
-            let data = '';
-
-            // A chunk of data has been received.
-            resp.on('data', (chunk) => {
-                data += chunk;
-                console.log("Chunk recibido:", chunk); // Depuración
-            });
-
-            // The whole response has been received.
-            resp.on('end', async () => {
-                console.log("Respuesta completa recibida:", data); // Depuración
-                try {
-                    const response = JSON.parse(data);
-                    console.log("Respuesta de MercadoPago:", response); // Depuración
-                    if (!response.id) {
-                        return res.status(500).json({ error: "ID de respuesta inválido" });
-                    }
-                    await db.collection('transactions').doc(response.id).set({
-                        machine_id,
-                        status: "pending",
-                        items
-                    });
-                    console.log(`Transacción guardada en Firestore con ID: ${response.id}`);
-
-                    res.json({ payment_url: response.init_point, qr_data: response.id });
-                } catch (parseError) {
-                    console.error("Error al parsear la respuesta de MercadoPago:", parseError);
-                    res.status(500).json({ error: "Error al procesar la respuesta de MercadoPago" });
+        const response = await axios.post(
+            'https://api.mercadopago.com/checkout/preferences',
+            preference,
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${MERCADOPAGO_ACCESS_TOKEN}`
                 }
-            });
-        });
+            }
+        );
 
-        reqMercadoPago.on('error', (e) => {
-            console.error(`Problema con la solicitud a MercadoPago: ${e.message}`);
-            res.status(500).json({ error: "Error al crear pago" });
-        });
+        console.log("Respuesta de MercadoPago:", response.data); // Depuración
 
-        // Write data to request body
-        reqMercadoPago.write(postData);
-        reqMercadoPago.end();
+        if (!response.data.id) {
+            return res.status(500).json({ error: "ID de respuesta inválido" });
+        }
+
+        await db.collection('transactions').doc(response.data.id).set({
+            machine_id,
+            status: "pending",
+            items
+        });
+        console.log(`Transacción guardada en Firestore con ID: ${response.data.id}`);
+
+        res.json({ payment_url: response.data.init_point, qr_data: response.data.id });
 
     } catch (error) {
-        console.error("Error creando pago:", error);
+        console.error("Error al crear pago:", error.response ? error.response.data : error.message);
         res.status(500).json({ error: "Error al crear pago" });
     }
 });
