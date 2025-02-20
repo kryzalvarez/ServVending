@@ -50,7 +50,7 @@ app.get("/", (req, res) => {
 app.post("/create-payment", async (req, res) => {
   try {
     const { machine_id, items } = req.body;
-
+//
     const preferenceData = {
       body: {
         items: items.map(item => ({
