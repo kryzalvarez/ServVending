@@ -12,6 +12,7 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
     "firebase-admin": "^13.1.0",
+    "google-gax": "^4.4.1",
     "mercadopago": "^2.3.0",
     "stripe": "^17.3.1"
   }
