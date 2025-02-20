@@ -72,18 +72,23 @@ app.post("/create-payment", async (req, res) => {
 
             // The whole response has been received.
             resp.on('end', async () => {
-                console.log("Respuesta de MercadoPago:", data); // Depuración
-                const response = JSON.parse(data);
-                if (!response.id) {
-                    return res.status(500).json({ error: "ID de respuesta inválido" });
-                }
-                await db.collection('transactions').doc(response.id).set({
-                    machine_id,
-                    status: "pending",
-                    items
-                });
+                try {
+                    const response = JSON.parse(data);
+                    console.log("Respuesta de MercadoPago:", response); // Depuración
+                    if (!response.id) {
+                        return res.status(500).json({ error: "ID de respuesta inválido" });
+                    }
+                    await db.collection('transactions').doc(response.id).set({
+                        machine_id,
+                        status: "pending",
+                        items
+                    });
 
-                res.json({ payment_url: response.init_point, qr_data: response.id });
+                    res.json({ payment_url: response.init_point, qr_data: response.id });
+                } catch (parseError) {
+                    console.error("Error al parsear la respuesta de MercadoPago:", parseError);
+                    res.status(500).json({ error: "Error al procesar la respuesta de MercadoPago" });
+                }
             });
         });
 
