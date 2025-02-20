@@ -10,7 +10,7 @@
     {
       "src": "/(.*)",
       "dest": "server.js"
-      // Elimina el header "x-forwarded-proto"
+    
     }
   ]
 }
