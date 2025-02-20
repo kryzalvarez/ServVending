@@ -16,7 +16,7 @@ const MERCADOPAGO_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN;
 admin.initializeApp({
     credential: admin.credential.cert({
         project_id: process.env.FIREBASE_PROJECT_ID,
-        private_key: process.env. private_key.replace(/\\n/g, '\n'),
+        private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
         client_email: process.env.FIREBASE_CLIENT_EMAIL
     }),
     databaseURL: `https://${process.env.FIREBASE_PROJECT_ID}.firebaseio.com`
