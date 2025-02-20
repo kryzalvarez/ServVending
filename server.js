@@ -14,13 +14,18 @@ const PORT = process.env.PORT || 3000;
 const MERCADOPAGO_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN;
 
 // Ruta al archivo de credenciales de Firebase
-const serviceAccount = require(path.join(__dirname, 'serviceAccountKey.json'));
+const serviceAccount = require(path.join(__dirname, 'servivending-94889-firebase-adminsdk-fbsvc-c5af76dec6.json'));
 
 // Inicializa Firebase con el archivo de credenciales
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-    databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
-});
+try {
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
+    });
+    console.log("Firebase inicializado correctamente.");
+} catch (error) {
+    console.error("Error al inicializar Firebase:", error);
+}
 
 const db = admin.firestore();
 
@@ -83,6 +88,7 @@ app.post("/create-payment", async (req, res) => {
                         status: "pending",
                         items
                     });
+                    console.log(`Transacción guardada en Firestore con ID: ${response.id}`);
 
                     res.json({ payment_url: response.init_point, qr_data: response.id });
                 } catch (parseError) {
@@ -93,7 +99,7 @@ app.post("/create-payment", async (req, res) => {
         });
 
         reqMercadoPago.on('error', (e) => {
-            console.error(`Problema con la solicitud: ${e.message}`);
+            console.error(`Problema con la solicitud a MercadoPago: ${e.message}`);
             res.status(500).json({ error: "Error al crear pago" });
         });
 
@@ -130,6 +136,8 @@ app.post("/payment-webhook", async (req, res) => {
                 await transactionRef.update({ status: "failed" });
                 console.log(`❌ Pago fallido para la máquina ${doc.data().machine_id}`);
             }
+        } else {
+            console.log(`Transacción no encontrada para ID: ${prefId}`);
         }
 
         res.sendStatus(200);
@@ -152,6 +160,7 @@ app.get("/transaction-status/:transaction_id", async (req, res) => {
         if (doc.exists) {
             res.json(doc.data());
         } else {
+            console.log(`Transacción no encontrada para ID: ${transaction_id}`);
             res.json({ error: "Transacción no encontrada" });
         }
     } catch (error) {
