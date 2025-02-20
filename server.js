@@ -4,11 +4,11 @@ const https = require('https'); // Usar el módulo https en lugar de Axios
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const admin = require("firebase-admin");
-//fffgg
+
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
-//
+
 const PORT = process.env.PORT || 3000;
 const MERCADOPAGO_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN;
 
@@ -68,6 +68,9 @@ app.post("/create-payment", async (req, res) => {
             // The whole response has been received.
             resp.on('end', async () => {
                 const response = JSON.parse(data);
+                if (!response.id) {
+                    return res.status(500).json({ error: "ID de respuesta inválido" });
+                }
                 await db.collection('transactions').doc(response.id).set({
                     machine_id,
                     status: "pending",
@@ -99,6 +102,10 @@ app.post("/payment-webhook", async (req, res) => {
         const paymentData = req.body;
         const prefId = paymentData.data.id;
 
+        if (!prefId) {
+            return res.sendStatus(400);
+        }
+
         const transactionRef = db.collection('transactions').doc(prefId);
         const doc = await transactionRef.get();
 
@@ -125,6 +132,9 @@ app.post("/payment-webhook", async (req, res) => {
 app.get("/transaction-status/:transaction_id", async (req, res) => {
     try {
         const { transaction_id } = req.params;
+        if (!transaction_id) {
+            return res.status(400).json({ error: "ID de transacción inválido" });
+        }
         const transactionRef = db.collection('transactions').doc(transaction_id);
         const doc = await transactionRef.get();
 
