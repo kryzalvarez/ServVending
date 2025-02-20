@@ -1,9 +1,10 @@
 require("dotenv").config();
 const express = require("express");
-const https = require('https'); // Usar el módulo https en lugar de Axios
+const https = require('https');
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const admin = require("firebase-admin");
+const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -12,14 +13,13 @@ app.use(bodyParser.json());
 const PORT = process.env.PORT || 3000;
 const MERCADOPAGO_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN;
 
-// Inicializa Firebase con variables de entorno
+// Ruta al archivo de credenciales de Firebase
+const serviceAccount = require(path.join(__dirname, 'serviceAccountKey.json'));
+
+// Inicializa Firebase con el archivo de credenciales
 admin.initializeApp({
-    credential: admin.credential.cert({
-        project_id: process.env.FIREBASE_PROJECT_ID,
-        private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        client_email: process.env.FIREBASE_CLIENT_EMAIL
-    }),
-    databaseURL: `https://${process.env.FIREBASE_PROJECT_ID}.firebaseio.com`
+    credential: admin.credential.cert(serviceAccount),
+    databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
 });
 
 const db = admin.firestore();
