@@ -1,3 +1,4 @@
+process.env.GOOGLE_CLOUD_DISABLE_GRPC = 'true';
 require("dotenv").config();
 const express = require("express");
 const { MercadoPagoConfig, Preference, Payment } = require("mercadopago");
