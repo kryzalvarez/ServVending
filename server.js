@@ -24,6 +24,11 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+// Ruta de inicio para verificar el despliegue
+app.get("/", (req, res) => {
+    res.send("¡Backend desplegado correctamente!");
+});
+
 // Ruta para generar un pago y código QR
 app.post("/create-payment", async (req, res) => {
     try {
@@ -67,6 +72,7 @@ app.post("/create-payment", async (req, res) => {
 
             // The whole response has been received.
             resp.on('end', async () => {
+                console.log("Respuesta de MercadoPago:", data); // Depuración
                 const response = JSON.parse(data);
                 if (!response.id) {
                     return res.status(500).json({ error: "ID de respuesta inválido" });
