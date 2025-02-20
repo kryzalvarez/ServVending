@@ -6,10 +6,11 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.12.6",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
-    "firebase-admin": "^13.0.1",
+    "firebase-admin": "^13.1.0",
     "stripe": "^17.3.1"
   }
 }
