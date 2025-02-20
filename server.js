@@ -1,6 +1,6 @@
 require("dotenv").config();
 const express = require("express");
-const mercadopago = require("mercadopago");
+const { MercadoPagoConfig, Preference, Payment } = require("mercadopago");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const admin = require("firebase-admin");
@@ -11,13 +11,16 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Configuración de MercadoPago
-mercadopago.configure({
-  access_token: process.env.MERCADOPAGO_ACCESS_TOKEN,
-  sandbox: process.env.NODE_ENV === "development", // Modo sandbox en desarrollo
+// 1. Configuración de MercadoPago (Versión Nueva)
+const client = new MercadoPagoConfig({
+  accessToken: process.env.MERCADOPAGO_ACCESS_TOKEN,
+  options: { sandbox: process.env.NODE_ENV === "development" }
 });
 
-// Configuración de Firebase
+const preferenceClient = new Preference(client);
+const paymentClient = new Payment(client);
+
+// 2. Configuración de Firebase
 const serviceAccount = {
   type: process.env.FIREBASE_TYPE,
   project_id: process.env.FIREBASE_PROJECT_ID,
@@ -31,51 +34,43 @@ const serviceAccount = {
   client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL
 };
 
-try {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-    databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
-  });
-  console.log("Firebase inicializado correctamente");
-} catch (error) {
-  console.error("Error de Firebase:", error);
-}
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
+});
 
 const db = admin.firestore();
 
-// Endpoint de prueba
+// 3. Endpoints
 app.get("/", (req, res) => {
-  res.send("Backend operativo ✅");
+  res.send("Backend MercadoPago v2 🚀");
 });
 
-// Creación de preferencia de pago
 app.post("/create-payment", async (req, res) => {
   try {
     const { machine_id, items } = req.body;
 
-    if (!machine_id || !items?.length) {
-      return res.status(400).json({ error: "Datos inválidos" });
-    }
-
-    const preference = {
-      items: items.map(item => ({
-        title: item.name.substring(0, 50), // Limita título a 50 caracteres
-        quantity: Number(item.quantity),
-        currency_id: "MXN",
-        unit_price: Number(item.price)
-      })),
-      external_reference: machine_id,
-      notification_url: `${process.env.BACKEND_URL}/payment-webhook`,
-      auto_return: "approved",
-      back_urls: {
-        success: `${process.env.FRONTEND_URL}/payment-success`,
-        failure: `${process.env.FRONTEND_URL}/payment-error`
+    const preferenceData = {
+      body: {
+        items: items.map(item => ({
+          title: item.name.substring(0, 50),
+          quantity: Number(item.quantity),
+          currency_id: "MXN",
+          unit_price: Number(item.price)
+        })),
+        external_reference: machine_id,
+        notification_url: `${process.env.BACKEND_URL}/payment-webhook`,
+        back_urls: {
+          success: `${process.env.FRONTEND_URL}/success`,
+          failure: `${process.env.FRONTEND_URL}/error`
+        },
+        auto_return: "approved"
       }
     };
 
-    const response = await mercadopago.preferences.create(preference);
-    
-    await db.collection('transactions').doc(response.body.id).set({
+    const preference = await preferenceClient.create(preferenceData);
+
+    await db.collection("transactions").doc(preference.id).set({
       machine_id,
       status: "pending",
       items,
@@ -83,51 +78,38 @@ app.post("/create-payment", async (req, res) => {
     });
 
     res.json({
-      payment_id: response.body.id,
-      payment_url: response.body.init_point,
-      sandbox_url: response.body.sandbox_init_point
+      id: preference.id,
+      init_point: preference.init_point,
+      sandbox_init_point: preference.sandbox_init_point
     });
 
   } catch (error) {
-    console.error("Error completo:", {
-      message: error.message,
-      stack: error.stack,
-      response: error.response?.body
-    });
-    res.status(500).json({ error: "Error al crear pago", details: error.message });
+    console.error("Error al crear pago:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Webhook de notificaciones
 app.post("/payment-webhook", async (req, res) => {
   try {
-    const paymentId = req.query.id || req.body.data.id;
+    const paymentId = req.body.data.id;
     
-    if (!paymentId) {
-      return res.status(400).send("ID de pago no proporcionado");
-    }
-
-    const payment = await mercadopago.payment.findById(paymentId);
-    const transactionRef = db.collection('transactions').doc(paymentId);
-
-    await transactionRef.update({
-      status: payment.body.status,
+    const payment = await paymentClient.get({ id: paymentId });
+    
+    await db.collection("transactions").doc(paymentId).update({
+      status: payment.status,
       updated_at: admin.firestore.FieldValue.serverTimestamp(),
-      payment_details: payment.body
+      payment_details: payment
     });
 
-    console.log(`Estado actualizado a ${payment.body.status} para ${paymentId}`);
+    console.log(`✅ Pago ${paymentId} actualizado a: ${payment.status}`);
     res.sendStatus(200);
 
   } catch (error) {
-    console.error("Error en webhook:", {
-      error: error.message,
-      body: req.body
-    });
+    console.error("Error en webhook:", error);
     res.sendStatus(500);
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor listo en puerto ${PORT}`);
+  console.log(`Servidor activo en puerto ${PORT}`);
 });
