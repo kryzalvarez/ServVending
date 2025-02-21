@@ -1,11 +1,10 @@
-process.env.GOOGLE_CLOUD_DISABLE_GRPC = 'false';
 require("dotenv").config();
 const express = require("express");
 const { MercadoPagoConfig, Preference, Payment } = require("mercadopago");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const admin = require("firebase-admin");
-//ggrr
+
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
@@ -22,18 +21,9 @@ const preferenceClient = new Preference(client);
 const paymentClient = new Payment(client);
 
 // 2. Configuración de Firebase
-const serviceAccount = {
-  type: process.env.FIREBASE_TYPE,
-  project_id: process.env.FIREBASE_PROJECT_ID,
-  private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-  private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-  client_email: process.env.FIREBASE_CLIENT_EMAIL,
-  client_id: process.env.FIREBASE_CLIENT_ID,
-  auth_uri: "https://accounts.google.com/o/oauth2/auth",
-  token_uri: "https://oauth2.googleapis.com/token",
-  auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
-  client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL
-};
+const base64EncodedServiceAccount = process.env.BASE64_ENCODED_SERVICE_ACCOUNT;
+const decodedServiceAccount = Buffer.from(base64EncodedServiceAccount, 'base64').toString('utf-8');
+const serviceAccount = JSON.parse(decodedServiceAccount);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -50,7 +40,7 @@ app.get("/", (req, res) => {
 app.post("/create-payment", async (req, res) => {
   try {
     const { machine_id, items } = req.body;
-//
+
     const preferenceData = {
       body: {
         items: items.map(item => ({
@@ -93,9 +83,9 @@ app.post("/create-payment", async (req, res) => {
 app.post("/payment-webhook", async (req, res) => {
   try {
     const paymentId = req.body.data.id;
-    
+
     const payment = await paymentClient.get({ id: paymentId });
-    
+
     await db.collection("transactions").doc(paymentId).update({
       status: payment.status,
       updated_at: admin.firestore.FieldValue.serverTimestamp(),
