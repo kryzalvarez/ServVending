@@ -1,22 +1,29 @@
-require('dotenv').config();
-const express = require('express');
-const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const admin = require('firebase-admin');
-const app = express();
+require("dotenv").config();
+const express = require("express");
+const { MercadoPagoConfig, Preference, Payment } = require("mercadopago");
+const cors = require("cors");
+const bodyParser = require("body-parser");
+const admin = require("firebase-admin");
 
+const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
+const PORT = process.env.PORT || 3000;
+
+// 1. Configuración de MercadoPago (Versión Nueva)
 const client = new MercadoPagoConfig({
   accessToken: process.env.MERCADOPAGO_ACCESS_TOKEN,
-  options: { sandbox: process.env.NODE_ENV === 'development' }
+  options: { sandbox: process.env.NODE_ENV === "development" }
 });
 
-const serviceAccount = JSON.parse(
-  Buffer.from(process.env.BASE64_ENCODED_SERVICE_ACCOUNT, 'base64').toString('utf-8')
-);
+const preferenceClient = new Preference(client);
+const paymentClient = new Payment(client);
+
+// 2. Configuración de Firebase
+const base64EncodedServiceAccount = process.env.BASE64_ENCODED_SERVICE_ACCOUNT;
+const decodedServiceAccount = Buffer.from(base64EncodedServiceAccount, 'base64').toString('utf-8');
+const serviceAccount = JSON.parse(decodedServiceAccount);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -25,12 +32,16 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// Endpoint para crear pago
-app.post('/create-payment', async (req, res) => {
+// 3. Endpoints
+app.get("/", (req, res) => {
+  res.send("Backend MercadoPago v2 🚀");
+});
+
+app.post("/create-payment", async (req, res) => {
   try {
     const { machine_id, items } = req.body;
-    
-    const preference = await new Preference(client).create({
+
+    const preferenceData = {
       body: {
         items: items.map(item => ({
           title: item.name.substring(0, 50),
@@ -46,11 +57,13 @@ app.post('/create-payment', async (req, res) => {
         },
         auto_return: "approved"
       }
-    });
+    };
 
-    await db.collection('transactions').doc(preference.id).set({
+    const preference = await preferenceClient.create(preferenceData);
+
+    await db.collection("transactions").doc(preference.id).set({
       machine_id,
-      status: 'pending',
+      status: "pending",
       items,
       created_at: admin.firestore.FieldValue.serverTimestamp()
     });
@@ -62,70 +75,32 @@ app.post('/create-payment', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error:', error);
+    console.error("Error al crear pago:", error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Webhook para actualizar estado
-app.post('/payment-webhook', async (req, res) => {
+app.post("/payment-webhook", async (req, res) => {
   try {
     const paymentId = req.body.data.id;
-    const payment = await new Payment(client).get({ id: paymentId });
 
-    const updateData = {
+    const payment = await paymentClient.get({ id: paymentId });
+
+    await db.collection("transactions").doc(paymentId).update({
       status: payment.status,
-      payment_method: payment.payment_method_id,
-      amount: payment.transaction_amount,
-      last_update: admin.firestore.FieldValue.serverTimestamp(),
-      payer_email: payment.payer?.email,
-      metadata: {
-        approval_url: payment.point_of_interaction?.transaction_data?.ticket_url
-      }
-    };
+      updated_at: admin.firestore.FieldValue.serverTimestamp(),
+      payment_details: payment
+    });
 
-    await db.collection('transactions').doc(paymentId).update(updateData);
-
-    // Notificación a máquina
-    if (payment.status === 'approved') {
-      const machineRef = db.collection('machines').doc(payment.external_reference);
-      const machine = await machineRef.get();
-      
-      if (machine.exists) {
-        await admin.messaging().send({
-          token: machine.data().fcm_token,
-          notification: {
-            title: 'Pago Aprobado',
-            body: `Monto: $${payment.transaction_amount} MXN`
-          }
-        });
-      }
-    }
-
+    console.log(`✅ Pago ${paymentId} actualizado a: ${payment.status}`);
     res.sendStatus(200);
+
   } catch (error) {
-    console.error('Webhook error:', error);
+    console.error("Error en webhook:", error);
     res.sendStatus(500);
   }
 });
 
-// Endpoint para consultar estado
-app.get('/payment-status/:paymentId', async (req, res) => {
-  try {
-    const doc = await db.collection('transactions').doc(req.params.paymentId).get();
-    
-    if (!doc.exists) {
-      return res.status(404).json({ error: 'Transacción no encontrada' });
-    }
-
-    res.json(doc.data());
-    
-  } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.listen(process.env.PORT || 3000, () => {
-  console.log(`Servidor listo en puerto ${process.env.PORT || 3000}`);
+app.listen(PORT, () => {
+  console.log(`Servidor activo en puerto ${PORT}`);
 });
