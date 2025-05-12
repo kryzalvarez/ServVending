@@ -1,106 +1,107 @@
 require("dotenv").config();
 const express = require("express");
-const { MercadoPagoConfig, Preference, Payment } = require("mercadopago");
-const cors = require("cors");
-const bodyParser = require("body-parser");
-const admin = require("firebase-admin");
+const { MercadoPagoConfig, Preference } = require("mercadopago");
 
 const app = express();
-app.use(cors());
-app.use(bodyParser.json());
+const PORT = process.env.PORT || 3001; // Puerto diferente al anterior si aún está corriendo
 
-const PORT = process.env.PORT || 3000;
+// 1. Configuración de MercadoPago
+// Utiliza tu ACCESS TOKEN de PRUEBA (Sandbox) para este ejemplo
+const accessToken = process.env.MERCADOPAGO_ACCESS_TOKEN;
 
-// 1. Configuración de MercadoPago (Versión Nueva)
+if (!accessToken) {
+  console.error("Error: MERCADOPAGO_ACCESS_TOKEN no encontrado en .env");
+  process.exit(1);
+}
+
 const client = new MercadoPagoConfig({
-  accessToken: process.env.MERCADOPAGO_ACCESS_TOKEN,
-  options: { sandbox: process.env.NODE_ENV === "development" }
+  accessToken: accessToken,
+  options: {
+    timeout: 5000, // Opcional: tiempo de espera para las solicitudes
+    // La opción sandbox se infiere del tipo de token (TEST- vs APP_USR-)
+    // o puede ser explícita si NODE_ENV se usa para más que solo esto.
+    // Para tokens TEST-xxx, el entorno es inherentemente sandbox.
+  }
 });
 
 const preferenceClient = new Preference(client);
-const paymentClient = new Payment(client);
 
-// 2. Configuración de Firebase
-const base64EncodedServiceAccount = process.env.BASE64_ENCODED_SERVICE_ACCOUNT;
-const decodedServiceAccount = Buffer.from(base64EncodedServiceAccount, 'base64').toString('utf-8');
-const serviceAccount = JSON.parse(decodedServiceAccount);
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
-});
-
-const db = admin.firestore();
-
-// 3. Endpoints
-app.get("/", (req, res) => {
-  res.send("Backend MercadoPago v2 🚀");
-});
-
-app.post("/create-payment", async (req, res) => {
+// Endpoint para crear la preferencia de pago
+app.get("/crear-pago-simple", async (req, res) => {
   try {
-    const { machine_id, items } = req.body;
+    console.log("Intentando crear preferencia de pago simple...");
 
     const preferenceData = {
       body: {
-        items: items.map(item => ({
-          title: item.name.substring(0, 50),
-          quantity: Number(item.quantity),
-          currency_id: "MXN",
-          unit_price: Number(item.price)
-        })),
-        external_reference: machine_id,
-        notification_url: `${process.env.BACKEND_URL}/payment-webhook`,
-        back_urls: {
-          success: `${process.env.FRONTEND_URL}/success`,
-          failure: `${process.env.FRONTEND_URL}/error`
+        items: [
+          {
+            title: "Producto de Prueba Simple",
+            quantity: 1,
+            unit_price: 10.00, // Precio: 10 pesos
+            currency_id: "MXN", // Moneda: Pesos Mexicanos
+            description: "Cobro de ejemplo por 10 MXN",
+            category_id: "services" // Opcional: categoría del producto
+          }
+        ],
+        payer: { // Información opcional del pagador
+            name: "Test",
+            surname: "User",
+            email: "test_user_123456@testuser.com", // Email de prueba válido
         },
-        auto_return: "approved"
+        back_urls: { // URLs de redirección (pueden ser ficticias para este ejemplo simple)
+          success: "http://localhost:3001/success",
+          failure: "http://localhost:3001/failure",
+          pending: "http://localhost:3001/pending"
+        },
+        auto_return: "approved", // Redirigir automáticamente en caso de pago aprobado
+        // Es buena práctica incluir una URL de notificación, aunque para este log no es estrictamente necesaria
+        // notification_url: "https://tu-url-publica.com/webhook-mercadopago",
+        external_reference: `simple_test_${Date.now()}` // Referencia externa única
       }
     };
 
     const preference = await preferenceClient.create(preferenceData);
 
-    await db.collection("transactions").doc(preference.id).set({
-      machine_id,
-      status: "pending",
-      items,
-      created_at: admin.firestore.FieldValue.serverTimestamp()
-    });
+    console.log("--- Preferencia de Pago Creada ---");
+    console.log("ID de Preferencia:", preference.id);
+
+    // El SDK v3 devuelve el init_point directamente para el entorno correcto (sandbox o prod)
+    // basado en el token. Si usas un token TEST-xxxx, init_point será de sandbox.
+    console.log("Link de Pago (init_point):", preference.init_point);
+
+    // sandbox_init_point también se proporciona si el token es de prueba
+    if (preference.sandbox_init_point) {
+        console.log("Link de Pago (sandbox_init_point):", preference.sandbox_init_point);
+    }
+    console.log("------------------------------------");
 
     res.json({
-      id: preference.id,
+      message: "Preferencia creada. Revisa la consola para ver el link de pago.",
+      preferenceId: preference.id,
       init_point: preference.init_point,
-      sandbox_init_point: preference.sandbox_init_point
+      sandbox_init_point: preference.sandbox_init_point // Enviar también por si acaso
     });
 
   } catch (error) {
-    console.error("Error al crear pago:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post("/payment-webhook", async (req, res) => {
-  try {
-    const paymentId = req.body.data.id;
-
-    const payment = await paymentClient.get({ id: paymentId });
-
-    await db.collection("transactions").doc(paymentId).update({
-      status: payment.status,
-      updated_at: admin.firestore.FieldValue.serverTimestamp(),
-      payment_details: payment
+    console.error("Error al crear la preferencia de pago:", error);
+    // Para ver más detalles del error de MercadoPago
+    if (error.cause) {
+        console.error("Causa del error de MercadoPago:", JSON.stringify(error.cause, null, 2));
+    }
+    res.status(500).json({
+        error: "No se pudo crear la preferencia de pago",
+        details: error.message,
+        cause: error.cause || "No additional cause information"
     });
-
-    console.log(`✅ Pago ${paymentId} actualizado a: ${payment.status}`);
-    res.sendStatus(200);
-
-  } catch (error) {
-    console.error("Error en webhook:", error);
-    res.sendStatus(500);
   }
 });
+
+// Rutas de ejemplo para back_urls (solo para demostrar)
+app.get("/success", (req, res) => res.send("Pago Exitoso (simulado)"));
+app.get("/failure", (req, res) => res.send("Pago Fallido (simulado)"));
+app.get("/pending", (req, res) => res.send("Pago Pendiente (simulado)"));
 
 app.listen(PORT, () => {
-  console.log(`Servidor activo en puerto ${PORT}`);
+  console.log(`Servidor simple de MercadoPago escuchando en http://localhost:${PORT}`);
+  console.log(`Para generar un cobro de 10 MXN, visita: http://localhost:${PORT}/crear-pago-simple`);
 });
