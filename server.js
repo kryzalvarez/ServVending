@@ -6,7 +6,7 @@ const express = require("express");
 const { MercadoPagoConfig, Preference, Payment } = require("mercadopago"); // SDK v3 de Mercado Pago
 const cors = require("cors");
 const bodyParser = require("body-parser");
-const admin = require("firebase-admin"); // <<<--- Firebase Admin SDK está activo
+const admin = require("firebase-admin"); // Firebase Admin SDK está activo
 
 // Inicialización de Express
 const app = express();
@@ -29,50 +29,40 @@ const paymentClient = new Payment(client);
 
 console.log(`Mercado Pago SDK inicializado en modo ${process.env.NODE_ENV === "development" ? 'Sandbox' : 'Producción'}`);
 
-// --- SECCIÓN FIREBASE REACTIVADA ---
 // 2. Configuración de Firebase Admin SDK
 const base64EncodedServiceAccount = process.env.BASE64_ENCODED_SERVICE_ACCOUNT;
 
 if (!base64EncodedServiceAccount) {
   console.error("ERROR FATAL: La variable de entorno BASE64_ENCODED_SERVICE_ACCOUNT no está definida.");
-  process.exit(1); // Termina si no hay credenciales de Firebase
+  process.exit(1);
 }
 
-let db; // Declarar db fuera del try para que esté disponible globalmente en este módulo
+let db;
 try {
   const decodedServiceAccount = Buffer.from(base64EncodedServiceAccount, 'base64').toString('utf-8');
   const serviceAccount = JSON.parse(decodedServiceAccount);
 
-  // Evitar reinicializar Firebase si ya existe una app
   if (admin.apps.length === 0) {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
-      // Opcional: Especificar databaseURL si usas Realtime Database además de Firestore
-      // databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
     });
     console.log("Firebase Admin SDK inicializado por primera vez.");
   } else {
     console.log("Firebase Admin SDK ya estaba inicializado.");
   }
-
-  db = admin.firestore(); // Obtener instancia de Firestore
+  db = admin.firestore();
   console.log("Instancia de Firestore obtenida.");
-
 } catch (error) {
    console.error("ERROR FATAL: No se pudo inicializar Firebase Admin SDK o obtener Firestore.", error);
    process.exit(1);
 }
-// --- FIN SECCIÓN FIREBASE REACTIVADA ---
-
 
 // --- 3. Endpoints de la API ---
 
-// Endpoint raíz de prueba
 app.get("/", (req, res) => {
   res.send("Backend MercadoPago v2 para Vending (CON FIRESTORE) 🚀");
 });
 
-// Endpoint para crear la preferencia de pago (y obtener init_point)
 app.post("/create-payment", async (req, res) => {
   console.log("Recibida petición /create-payment:", JSON.stringify(req.body, null, 2));
   try {
@@ -83,13 +73,11 @@ app.post("/create-payment", async (req, res) => {
       return res.status(400).json({ error: "Faltan datos requeridos: machine_id y/o items válidos." });
     }
 
-    // Log crucial para verificar la URL de notificación
     const constructedNotificationUrl = `${process.env.BACKEND_URL}/payment-webhook`;
     console.log(">>> URL DE NOTIFICACIÓN QUE SE ENVIARÁ A MERCADO PAGO:", constructedNotificationUrl);
     if (!process.env.BACKEND_URL) {
         console.error("ALERTA: process.env.BACKEND_URL no está definida. La notification_url será inválida.");
     }
-
 
     const preferenceBody = {
       items: items.map(item => ({
@@ -101,7 +89,7 @@ app.post("/create-payment", async (req, res) => {
         unit_price: Number(item.price)
       })),
       external_reference: machine_id,
-      notification_url: constructedNotificationUrl, // Usar la variable logueada
+      notification_url: constructedNotificationUrl,
       back_urls: {
         success: `${process.env.FRONTEND_URL}/success?machine_id=${machine_id}`,
         failure: `${process.env.FRONTEND_URL}/error?machine_id=${machine_id}`,
@@ -110,13 +98,13 @@ app.post("/create-payment", async (req, res) => {
       auto_return: "approved"
     };
 
-     console.log("Creando preferencia con datos (preferenceBody):", JSON.stringify(preferenceBody, null, 2));
+    console.log("Creando preferencia con datos (preferenceBody):", JSON.stringify(preferenceBody, null, 2));
     const preference = await preferenceClient.create({ body: preferenceBody });
     console.log("Preferencia creada exitosamente por MP. ID de Preferencia:", preference.id);
 
     const transactionData = {
       machine_id: machine_id,
-      status: "pending", // Estado inicial
+      status: "pending",
       items: items,
       mp_preference_id: preference.id,
       created_at: admin.firestore.FieldValue.serverTimestamp()
@@ -137,7 +125,25 @@ app.post("/create-payment", async (req, res) => {
   }
 });
 
-// --- WEBHOOK CON LÓGICA DE FIRESTORE REACTIVADA Y AJUSTADA ---
+// --- NUEVO ENDPOINT DE PRUEBA SIMPLIFICADO ---
+app.post("/test-webhook", (req, res) => {
+  console.log(`\n--- [${new Date().toISOString()}] INICIO Webhook /test-webhook (RUTA DE PRUEBA SIMPLIFICADA) ---`);
+  console.log("Headers del /test-webhook:", JSON.stringify(req.headers, null, 2));
+  console.log("Cuerpo del /test-webhook (parseado):", JSON.stringify(req.body, null, 2));
+  console.log("Query params del /test-webhook:", JSON.stringify(req.query, null, 2)); // Para ver si MP envía algo por query
+
+  // Simplemente respondemos que recibimos algo
+  res.status(200).json({
+    message: "Test webhook received successfully at /test-webhook",
+    body_received: req.body,
+    query_received: req.query
+  });
+  console.log(`--- [${new Date().toISOString()}] FIN Webhook /test-webhook (Respuesta 200 enviada) ---`);
+});
+// --- FIN NUEVO ENDPOINT DE PRUEBA ---
+
+
+// --- WEBHOOK PRINCIPAL CON LÓGICA DE FIRESTORE ---
 app.post("/payment-webhook", async (req, res) => {
   console.log(`\n--- [${new Date().toISOString()}] INICIO Webhook /payment-webhook ---`);
   console.log("Headers del Webhook:", JSON.stringify(req.headers, null, 2));
@@ -177,7 +183,7 @@ app.post("/payment-webhook", async (req, res) => {
 
     console.log(`[TRY] Estado verificado para Pago ${paymentId} (Pref ID: ${preferenceId}, Ref Ext: ${externalReference}): ${paymentStatus}`);
 
-    if (!db) { // Chequeo por si db no se inicializó (aunque debería haber salido antes)
+    if (!db) {
         console.error("[TRY] ERROR CRÍTICO: Instancia de Firestore 'db' no está disponible.");
         return res.status(500).send("Error interno del servidor: Firestore no disponible.");
     }
