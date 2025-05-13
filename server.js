@@ -6,7 +6,7 @@ const express = require("express");
 const { MercadoPagoConfig, Preference, Payment } = require("mercadopago"); // SDK v3
 const cors = require("cors");
 const bodyParser = require("body-parser");
-const { kv } = require("@vercel/kv"); // ¡NUEVO! Importar Vercel KV
+const { kv } = require("@vercel/kv");
 
 // Inicialización de Express
 const app = express();
@@ -20,6 +20,29 @@ const PORT = process.env.PORT || 3000;
 
 // TTL para las entradas en KV (en segundos) - por ejemplo, 6 horas
 const KV_TTL_SECONDS = 6 * 60 * 60;
+
+// --- Validaciones de Variables de Entorno Críticas ---
+if (!process.env.MERCADOPAGO_ACCESS_TOKEN) {
+    console.error("ERROR CRÍTICO: MERCADOPAGO_ACCESS_TOKEN no está definido. El servicio no funcionará.");
+    // process.exit(1); // Descomentar para detener el servidor si falta
+}
+if (!process.env.BACKEND_URL) {
+    console.error("ERROR CRÍTICO: BACKEND_URL no está definida. Las notificaciones de Mercado Pago (webhooks) fallarán.");
+    // process.exit(1); // Descomentar para detener el servidor si falta
+}
+// FRONTEND_URL es necesaria si se usa auto_return con MercadoPago.
+// Si no se usa un frontend web, se puede usar BACKEND_URL para las pantallas de feedback.
+const FRONTEND_URL_BASE = process.env.FRONTEND_URL || process.env.BACKEND_URL;
+if (!FRONTEND_URL_BASE) {
+    console.warn(
+        "ADVERTENCIA: Ni process.env.FRONTEND_URL ni process.env.BACKEND_URL están definidas." +
+        "Las back_urls para Mercado Pago podrían ser inválidas si auto_return está activado, " +
+        "lo que causaría errores en la creación de la preferencia." +
+        "Se recomienda definir al menos BACKEND_URL para que las back_urls apunten a este mismo servidor."
+    );
+    // Si FRONTEND_URL_BASE sigue siendo nulo aquí, Mercado Pago podría rechazar la preferencia si auto_return="approved"
+}
+
 
 // 1. Configuración de MercadoPago (Usando SDK v3)
 const client = new MercadoPagoConfig({
@@ -36,13 +59,12 @@ console.log("INFO: Usando Vercel KV para almacenamiento de estados de pago.");
 // --- 3. Endpoints de la API ---
 
 app.get("/", (req, res) => {
-    res.send("Backend MercadoPago v3 para Vending (Vercel KV + External Ref) 🚀");
+    res.send("Backend MercadoPago v3 para Vending (Vercel KV + External Ref) 🚀 - Pantallas de Feedback Incluidas");
 });
 
 app.post("/create-payment", async (req, res) => {
     console.log("Recibida petición /create-payment:", JSON.stringify(req.body, null, 2));
     try {
-        // ¡NUEVO! Esperar vending_transaction_id y machine_id
         const { machine_id, items, vending_transaction_id } = req.body;
 
         if (!machine_id || !items || !Array.isArray(items) || items.length === 0 || !vending_transaction_id) {
@@ -52,41 +74,59 @@ app.post("/create-payment", async (req, res) => {
 
         const constructedNotificationUrl = `${process.env.BACKEND_URL}/payment-webhook`;
         console.log(">>> URL DE NOTIFICACIÓN QUE SE ENVIARÁ A MERCADO PAGO:", constructedNotificationUrl);
-        if (!process.env.BACKEND_URL) {
-            console.error("ALERTA: process.env.BACKEND_URL no está definida. La notification_url será inválida.");
+        
+        // --- Lógica de back_urls mejorada ---
+        // Asegurarse de que FRONTEND_URL_BASE tenga un valor para construir las URLs de feedback.
+        // Si FRONTEND_URL_BASE sigue siendo nulo aquí, es un problema de configuración grave.
+        let success_url, failure_url, pending_url;
+
+        if (FRONTEND_URL_BASE) {
+            success_url = `${FRONTEND_URL_BASE}/payment-feedback?status=success&vending_txn_id=${vending_transaction_id}&mp_payment_id={payment_id}&mp_status={status}`;
+            failure_url = `${FRONTEND_URL_BASE}/payment-feedback?status=failure&vending_txn_id=${vending_transaction_id}&mp_payment_id={payment_id}&mp_status={status}`;
+            pending_url = `${FRONTEND_URL_BASE}/payment-feedback?status=pending&vending_txn_id=${vending_transaction_id}&mp_payment_id={payment_id}&mp_status={status}`;
+        } else {
+            // Fallback MUY básico si todo lo demás falla (esto NO debería pasar si BACKEND_URL está definida)
+            // MP podría rechazar esto si no son URLs HTTPS válidas y públicas.
+            // Idealmente, el servidor debería fallar al iniciar si no puede construir URLs válidas.
+            console.error("ERROR CRÍTICO: No se pudo construir una base para back_urls. Usando placeholders relativos que probablemente fallarán con Mercado Pago.");
+            const placeholderBase = "/payment-feedback"; // Esto es solo un intento desesperado
+            success_url = `${placeholderBase}?status=success&vending_txn_id=${vending_transaction_id}`;
+            failure_url = `${placeholderBase}?status=failure&vending_txn_id=${vending_transaction_id}`;
+            pending_url = `${placeholderBase}?status=pending&vending_txn_id=${vending_transaction_id}`;
         }
+        
+        console.log(">>> URL de ÉXITO (back_url) que se enviará a MP:", success_url);
 
         const preferenceBody = {
             items: items.map(item => ({
-                id: item.id || undefined, // El ID del item en tu sistema, si lo tienes
+                id: item.id || undefined,
                 title: item.name ? item.name.substring(0, 250) : 'Producto',
                 description: item.description || `Producto de ${machine_id}`,
                 quantity: Number(item.quantity),
-                currency_id: "MXN", // O la moneda que uses
+                currency_id: "MXN",
                 unit_price: Number(item.price)
             })),
-            external_reference: vending_transaction_id, // ¡NUEVO! Usar vending_transaction_id
+            external_reference: vending_transaction_id,
             notification_url: constructedNotificationUrl,
-            back_urls: { // Opcional: URLs a las que el usuario es redirigido
-                success: `${process.env.FRONTEND_URL || req.protocol + '://' + req.get('host')}/payment-feedback?status=success&vending_txn_id=${vending_transaction_id}`,
-                failure: `${process.env.FRONTEND_URL || req.protocol + '://' + req.get('host')}/payment-feedback?status=failure&vending_txn_id=${vending_transaction_id}`,
-                pending: `${process.env.FRONTEND_URL || req.protocol + '://' + req.get('host')}/payment-feedback?status=pending&vending_txn_id=${vending_transaction_id}`
+            back_urls: {
+                success: success_url,
+                failure: failure_url,
+                pending: pending_url
             },
-            auto_return: "approved" // Opcional: Redirigir automáticamente si el pago es aprobado
+            auto_return: "approved"
         };
 
         console.log("Creando preferencia con datos (preferenceBody):", JSON.stringify(preferenceBody, null, 2));
         const preference = await preferenceClient.create({ body: preferenceBody });
         console.log("Preferencia creada exitosamente por MP. MP Preference ID:", preference.id, "External Reference (Vending Txn ID):", vending_transaction_id);
 
-        // ¡NUEVO! Guardar estado inicial en Vercel KV
         const kvKey = `txn:${vending_transaction_id}`;
         const initialTxnData = {
             status: "pending",
             machine_id: machine_id,
             items: items,
-            mp_preference_id: preference.id, // Guardamos el ID de preferencia de MP
-            mp_payment_id: null, // Aún no hay ID de pago
+            mp_preference_id: preference.id,
+            mp_payment_id: null,
             payment_status_detail: null,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
@@ -96,22 +136,47 @@ app.post("/create-payment", async (req, res) => {
         console.log(`Estado inicial para Vending Txn ID ${vending_transaction_id} ("pending") guardado en KV.`);
 
         res.json({
-            vending_transaction_id: vending_transaction_id, // Devolver el ID que la app usará para sondear
-            mp_preference_id: preference.id, // El ID de la preferencia de Mercado Pago
+            vending_transaction_id: vending_transaction_id,
+            mp_preference_id: preference.id,
             init_point: preference.init_point,
-            sandbox_init_point: preference.sandbox_init_point // Útil si estás probando en sandbox
+            sandbox_init_point: preference.sandbox_init_point
         });
 
     } catch (error) {
-        console.error("Error al crear preferencia de pago:", error.cause || error.message || error);
-        const errorDetails = error.cause ? JSON.stringify(error.cause, null, 2) : error.message;
+        console.error("Error al crear preferencia de pago:", error); // Log completo del objeto error
+        let errorDetails = "Error desconocido";
+        if (error.cause && typeof error.cause === 'string') {
+             try {
+                const causeObj = JSON.parse(error.cause);
+                errorDetails = causeObj.message || JSON.stringify(causeObj) ;
+             } catch (e) {
+                errorDetails = error.cause;
+             }
+        } else if (error.cause) {
+            errorDetails = JSON.stringify(error.cause, null, 2);
+        } else if (error.message) {
+            errorDetails = error.message;
+        }
+        
+        // Para errores del SDK de Mercado Pago, el error.cause puede ser un string JSON
+        // que contiene un array de causas. Intentamos parsear el primero si existe.
+        if (error.name === 'MercadoPagoError' && error.cause) {
+            try {
+                const causes = JSON.parse(error.cause);
+                if (Array.isArray(causes) && causes.length > 0) {
+                    errorDetails = causes[0].description || causes[0].message || JSON.stringify(causes[0]);
+                }
+            } catch (e) {
+                // Si no se puede parsear, usamos el error.cause tal cual (ya lo hicimos arriba)
+            }
+        }
+        
+        console.error("Detalles del error para la respuesta:", errorDetails);
         res.status(500).json({ error: "No se pudo crear la preferencia de pago.", details: errorDetails });
     }
 });
 
-// --- ENDPOINT GET /payment-status PARA POLLING (MODIFICADO) ---
-app.get("/payment-status", async (req, res) => { // Marcar como async
-    // ¡NUEVO! Usar vending_transaction_id
+app.get("/payment-status", async (req, res) => {
     const vendingTransactionId = req.query.vending_transaction_id;
 
     if (!vendingTransactionId) {
@@ -138,9 +203,6 @@ app.get("/payment-status", async (req, res) => { // Marcar como async
             vending_transaction_id: vendingTransactionId,
             status: transactionData.status,
             machine_id: transactionData.machine_id,
-            // Puedes añadir más detalles si la app los necesita y están en transactionData
-            // items: transactionData.items,
-            // payment_status_detail: transactionData.payment_status_detail
         });
     } catch (error) {
         console.error(`Error al leer estado de KV para Vending Txn ID ${vendingTransactionId}:`, error);
@@ -149,14 +211,13 @@ app.get("/payment-status", async (req, res) => { // Marcar como async
     console.log(`--- [${new Date().toISOString()}] FIN GET /payment-status ---`);
 });
 
-// --- WEBHOOK PRINCIPAL (MODIFICADO) ---
-app.post("/payment-webhook", async (req, res) => { // Marcar como async
+app.post("/payment-webhook", async (req, res) => {
     console.log(`\n--- [${new Date().toISOString()}] INICIO Webhook /payment-webhook ---`);
     console.log("Headers del Webhook:", JSON.stringify(req.headers, null, 2));
     console.log("Cuerpo del Webhook (parseado):", JSON.stringify(req.body, null, 2));
 
     const notificationType = req.body.type || req.query.type;
-    const paymentIdFromData = req.body.data?.id; // Este es el MP Payment ID
+    const paymentIdFromData = req.body.data?.id;
     const paymentIdFromQuery = req.query['data.id'] || req.query.id;
     let mpPaymentId = paymentIdFromData || paymentIdFromQuery;
 
@@ -168,7 +229,7 @@ app.post("/payment-webhook", async (req, res) => { // Marcar como async
     if (notificationType !== 'payment' || !mpPaymentId) {
         console.log("Notificación ignorada (no es de tipo 'payment' o falta MP Payment ID).");
         console.log(`--- [${new Date().toISOString()}] FIN Webhook (Ignorado/ID no encontrado) ---`);
-        return res.sendStatus(200); // Responder 200 OK a MP para que no reintente
+        return res.sendStatus(200);
     }
 
     try {
@@ -181,10 +242,9 @@ app.post("/payment-webhook", async (req, res) => { // Marcar como async
             return res.sendStatus(200);
         }
 
-        // ¡NUEVO! Usar external_reference como vending_transaction_id
         const vendingTransactionId = payment.external_reference;
-        const paymentStatus = payment.status; // ej. "approved", "rejected"
-        const mpPreferenceIdFromPayment = payment.preference_id; // El ID de preferencia asociado a este pago
+        const paymentStatus = payment.status;
+        const mpPreferenceIdFromPayment = payment.preference_id;
 
         console.log("----------------------------------------------------");
         console.log("--- DETALLES DEL PAGO OBTENIDOS DE MERCADO PAGO ---");
@@ -205,39 +265,32 @@ app.post("/payment-webhook", async (req, res) => { // Marcar como async
 
         if (currentTxnData) {
             currentTxnData.status = paymentStatus;
-            currentTxnData.mp_payment_id = payment.id; // Guardar el ID del pago de MP
+            currentTxnData.mp_payment_id = payment.id;
             currentTxnData.payment_status_detail = payment.status_detail;
             currentTxnData.updatedAt = new Date().toISOString();
             
-            // Log si el preference_id del pago difiere del que se guardó al crear la preferencia
             if (mpPreferenceIdFromPayment && currentTxnData.mp_preference_id !== mpPreferenceIdFromPayment) {
                 console.warn(`Webhook: MP Preference ID del pago (${mpPreferenceIdFromPayment}) difiere del guardado originalmente (${currentTxnData.mp_preference_id}) para Vending Txn ID ${vendingTransactionId}`);
             }
             currentTxnData.mp_reported_preference_id_on_payment = mpPreferenceIdFromPayment;
 
-
-            await kv.set(kvKey, currentTxnData, { ex: KV_TTL_SECONDS }); // Actualizar con TTL
+            await kv.set(kvKey, currentTxnData, { ex: KV_TTL_SECONDS });
             console.log(`Estado para Vending Txn ID ${vendingTransactionId} actualizado a '${paymentStatus}' en KV.`);
         } else {
-            // Esto podría pasar si el webhook llega antes de que /create-payment termine de escribir en KV,
-            // o si la entrada expiró, o si hubo un error en /create-payment al guardar en KV.
-            // O si el vending_transaction_id no coincide por alguna razón.
             console.warn(`Webhook: No se encontró estado inicial en KV para Vending Txn ID: ${vendingTransactionId}. Creando nueva entrada si el pago está aprobado/finalizado.`);
-            // Crear una entrada si el estado es relevante (aprobado, rechazado, etc.)
             if (['approved', 'rejected', 'cancelled', 'refunded'].includes(paymentStatus)) {
                 const newTxnData = {
                     status: paymentStatus,
-                    machine_id: null, // No podemos saberlo si no estaba la entrada original, o intentar obtenerlo de metadata si MP lo permite
+                    machine_id: payment.metadata?.machine_id || null, 
                     items: payment.additional_info?.items || [],
                     mp_preference_id: mpPreferenceIdFromPayment,
                     mp_payment_id: payment.id,
                     payment_status_detail: payment.status_detail,
                     createdAt: payment.date_created || new Date().toISOString(),
                     updatedAt: new Date().toISOString(),
-                    external_reference_from_payment: vendingTransactionId // Para confirmar
+                    external_reference_from_payment: vendingTransactionId
                 };
-                // Tratar de obtener machine_id de payment.metadata si lo hubieras configurado allí
-                if (payment.metadata && payment.metadata.machine_id) {
+                if (payment.metadata && payment.metadata.machine_id) { // Para que esto funcione, machine_id debe enviarse en metadata al crear preferencia
                     newTxnData.machine_id = payment.metadata.machine_id;
                 }
                 await kv.set(kvKey, newTxnData, { ex: KV_TTL_SECONDS });
@@ -246,33 +299,99 @@ app.post("/payment-webhook", async (req, res) => { // Marcar como async
         }
 
         if (paymentStatus === 'approved') {
-            console.log(`[INFO] PAGO APROBADO para MP Payment ID ${mpPaymentId} (Vending Txn ID: ${vendingTransactionId}). Machine: ${currentTxnData?.machine_id || 'No disponible en entrada KV'}.`);
-            console.log(`[INFO] 🚀 Aquí iría la lógica para notificar a la máquina que dispense el producto (si es necesario desde el backend).`);
+            console.log(`[INFO] PAGO APROBADO para MP Payment ID ${mpPaymentId} (Vending Txn ID: ${vendingTransactionId}). Machine: ${currentTxnData?.machine_id || payment.metadata?.machine_id || 'No disponible'}.`);
+            console.log(`[INFO] 🚀 Aquí iría la lógica para notificar a la máquina que dispense el producto.`);
         } else {
             console.log(`[INFO] Estado del pago ${mpPaymentId} (Vending Txn ID: ${vendingTransactionId}) es '${paymentStatus}'.`);
         }
 
-        res.sendStatus(200); // Siempre responder 200 OK a Mercado Pago
+        res.sendStatus(200);
 
     } catch (error) {
         console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-        console.error("!!!!!!!!    Error en CATCH procesando webhook     !!!!!!!!!");
-        if (error.cause) { // Error del SDK de Mercado Pago
-            console.error("Error Cause (SDK Mercado Pago):", JSON.stringify(error.cause, null, 2));
-        } else { // Otro tipo de error
+        console.error("!!!!!!!!    Error en CATCH procesando webhook      !!!!!!!!!");
+        if (error.cause) {
+            console.error("Error Cause (SDK Mercado Pago u otro):", JSON.stringify(error.cause, null, 2));
+        } else {
             console.error("Error Object (General):", error);
         }
         console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-        // No enviar error 500 a Mercado Pago a menos que sea estrictamente necesario,
-        // ya que podrían deshabilitar el webhook. Es mejor loguear y responder 200.
-        // Si el error es por ejemplo con KV, MP no necesita saberlo.
-        res.sendStatus(200); // Aún así responder 200 a MP para evitar reintentos excesivos.
+        res.sendStatus(200);
     }
     console.log(`--- [${new Date().toISOString()}] FIN Webhook /payment-webhook ---`);
 });
 
+// --- NUEVO: Endpoints para las "Pantallas" de Feedback de Mercado Pago ---
+app.get("/payment-feedback", (req, res) => {
+    const status = req.query.status;
+    const vendingTxnId = req.query.vending_txn_id;
+    const mpPaymentId = req.query.payment_id || req.query.mp_payment_id; // MP usa payment_id en la redirección
+    const mpStatus = req.query.status || req.query.mp_status; // MP usa status en la redirección
+    // Otros parámetros que MP podría enviar: collection_id, collection_status, preference_id, site_id, processing_mode, merchant_account_id, external_reference
 
-// --- Endpoint de prueba simple para webhooks (puedes mantenerlo para debugging) ---
+    console.log(`\n--- [${new Date().toISOString()}] INICIO GET /payment-feedback ---`);
+    console.log("Query Params recibidos en /payment-feedback:", JSON.stringify(req.query, null, 2));
+
+    let title = "Estado del Pago";
+    let message = `El estado de tu pago para la transacción ${vendingTxnId || 'desconocida'} es: ${status || 'desconocido'}.`;
+    let bgColor = "#eee";
+    let textColor = "#333";
+
+    switch (status) {
+        case "success":
+            title = "¡Pago Aprobado!";
+            message = `Tu pago (ID MP: ${mpPaymentId || 'N/A'}) para la transacción ${vendingTxnId} fue aprobado. Estado MP: ${mpStatus}.`;
+            bgColor = "#d4edda"; // Verde claro
+            textColor = "#155724";
+            break;
+        case "failure":
+            title = "Pago Rechazado";
+            message = `Tu pago (ID MP: ${mpPaymentId || 'N/A'}) para la transacción ${vendingTxnId} fue rechazado. Estado MP: ${mpStatus}. Por favor, intenta nuevamente o usa otro método de pago.`;
+            bgColor = "#f8d7da"; // Rojo claro
+            textColor = "#721c24";
+            break;
+        case "pending":
+            title = "Pago Pendiente";
+            message = `Tu pago (ID MP: ${mpPaymentId || 'N/A'}) para la transacción ${vendingTxnId} está pendiente de procesamiento. Estado MP: ${mpStatus}. Te notificaremos cuando cambie el estado.`;
+            bgColor = "#fff3cd"; // Amarillo claro
+            textColor = "#856404";
+            break;
+        default:
+            title = "Información de Pago";
+            message = `Información recibida para la transacción ${vendingTxnId}. Estado: ${status}, ID de Pago MP: ${mpPaymentId}.`;
+    }
+
+    // Enviar una respuesta HTML simple.
+    // Para una app Android que hace polling, esta pantalla es más para cumplir con MP si `auto_return` se usa.
+    // La app Android normalmente no verá esto directamente.
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="es">
+        <head>
+            <meta charset="UTF-F">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>${title} - Vending Machine</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 0; padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 90vh; text-align: center; background-color: #f0f0f0; }
+                .container { background-color: ${bgColor}; color: ${textColor}; padding: 30px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); max-width: 600px; }
+                h1 { margin-top: 0; }
+                p { line-height: 1.6; }
+                .footer { margin-top: 20px; font-size: 0.9em; color: #777; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>${title}</h1>
+                <p>${message}</p>
+                <p class="footer">Puedes cerrar esta ventana.</p>
+            </div>
+        </body>
+        </html>
+    `);
+    console.log(`--- [${new Date().toISOString()}] FIN GET /payment-feedback (Estado: ${status}) ---`);
+});
+
+
 app.post("/test-webhook", (req, res) => {
     console.log(`\n--- [${new Date().toISOString()}] INICIO Webhook /test-webhook ---`);
     console.log("Headers:", JSON.stringify(req.headers, null, 2));
@@ -285,9 +404,10 @@ app.post("/test-webhook", (req, res) => {
 // --- Iniciar el Servidor ---
 app.listen(PORT, () => {
     console.log(`Servidor Express escuchando en puerto ${PORT}`);
-    console.log(`URL Base (asegúrate que BACKEND_URL sea pública para webhooks): ${process.env.BACKEND_URL || 'URL NO DEFINIDA -> ¡WEBHOOKS FALLARÁN!'}`);
-    if (!process.env.MERCADOPAGO_ACCESS_TOKEN) console.error("ALERTA: MERCADOPAGO_ACCESS_TOKEN no está definido.");
-    if (!process.env.FRONTEND_URL) console.warn("ADVERTENCIA: FRONTEND_URL no está definido (back_urls podrían fallar).");
+    if (process.env.BACKEND_URL) { // BACKEND_URL es crítico
+        console.log(`URL Base (asegúrate que sea pública para webhooks y back_urls si FRONTEND_URL no está seteada): ${process.env.BACKEND_URL}`);
+    }
+    // No es necesario volver a loguear las variables de entorno aquí si ya se hizo arriba.
     console.log(`INFO: Este backend está configurado para MODO ${process.env.NODE_ENV === "development" ? 'Sandbox' : 'Producción'}.`);
     console.log("INFO: Usando Vercel KV para almacenamiento de estados de pago (HTTP Polling).");
 });
