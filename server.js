@@ -73,7 +73,7 @@ app.post("/create-payment", async (req, res) => {
       return res.status(400).json({ error: "Faltan datos requeridos: machine_id y/o items válidos." });
     }
 
-    const constructedNotificationUrl = `${process.env.BACKEND_URL}/payment-webhook`;
+    const constructedNotificationUrl = `${process.env.BACKEND_URL}payment-webhook`;
     console.log(">>> URL DE NOTIFICACIÓN QUE SE ENVIARÁ A MERCADO PAGO:", constructedNotificationUrl);
     if (!process.env.BACKEND_URL) {
         console.error("ALERTA: process.env.BACKEND_URL no está definida. La notification_url será inválida.");
