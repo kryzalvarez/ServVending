@@ -76,6 +76,11 @@ app.post("/create-payment", async (req, res) => {
       return res.status(400).json({ error: "Faltan datos requeridos: machine_id y/o items válidos." });
     }
 
+    // --- NUEVA ADICIÓN DE LOG AQUÍ ---
+    const constructedNotificationUrl = `${process.env.BACKEND_URL}/payment-webhook`;
+    console.log(">>> URL DE NOTIFICACIÓN QUE SE ENVIARÁ A MERCADO PAGO:", constructedNotificationUrl);
+    // --- FIN NUEVA ADICIÓN DE LOG ---
+
     const preferenceBody = {
       items: items.map(item => ({
         id: item.id || undefined,
@@ -86,7 +91,7 @@ app.post("/create-payment", async (req, res) => {
         unit_price: Number(item.price)
       })),
       external_reference: machine_id,
-      notification_url: `${process.env.BACKEND_URL}/payment-webhook`,
+      notification_url: constructedNotificationUrl, // Usar la variable logueada
       back_urls: {
         success: `${process.env.FRONTEND_URL}/success?machine_id=${machine_id}`,
         failure: `${process.env.FRONTEND_URL}/error?machine_id=${machine_id}`,
@@ -95,9 +100,9 @@ app.post("/create-payment", async (req, res) => {
       auto_return: "approved"
     };
 
-     console.log("Creando preferencia con datos:", JSON.stringify(preferenceBody, null, 2));
+     console.log("Creando preferencia con datos (preferenceBody):", JSON.stringify(preferenceBody, null, 2));
     const preference = await preferenceClient.create({ body: preferenceBody });
-    console.log("Preferencia creada exitosamente:", preference.id);
+    console.log("Preferencia creada exitosamente por MP. ID de Preferencia:", preference.id);
 
     // --- GUARDADO EN FIRESTORE REACTIVADO ---
     const transactionData = {
@@ -121,60 +126,86 @@ app.post("/create-payment", async (req, res) => {
 
   } catch (error) {
     console.error("Error al crear preferencia de pago:", error.cause || error.message || error);
-    res.status(500).json({ error: "No se pudo crear la preferencia de pago.", details: error.message });
+    // Para errores del SDK de Mercado Pago, 'error.cause' a menudo tiene más detalles.
+    const errorDetails = error.cause ? JSON.stringify(error.cause, null, 2) : error.message;
+    res.status(500).json({ error: "No se pudo crear la preferencia de pago.", details: errorDetails });
   }
 });
 
 // --- WEBHOOK CON LÓGICA DE FIRESTORE REACTIVADA Y AJUSTADA ---
 app.post("/payment-webhook", async (req, res) => {
-  console.log("Webhook recibido:", JSON.stringify(req.body, null, 2));
+  // Log de entrada al webhook
+  console.log(`\n--- [${new Date().toISOString()}] INICIO Webhook /payment-webhook ---`);
+  console.log("Headers del Webhook:", JSON.stringify(req.headers, null, 2));
+  console.log("Cuerpo del Webhook (parseado):", JSON.stringify(req.body, null, 2));
 
-  const notificationType = req.body.type || req.body.topic;
+  // Mercado Pago puede usar 'type' o 'topic' para el tipo de evento y a veces envía query params
+  const notificationType = req.body.type || req.query.type; // Revisar body primero, luego query
+  const paymentIdFromData = req.body.data?.id; // Del cuerpo JSON
+  const paymentIdFromQuery = req.query['data.id'] || req.query.id; // De query params (ej. data.id=123 o id=123)
 
-  if (notificationType !== 'payment' || !req.body?.data?.id) {
-     console.log("Notificación ignorada (tipo:", notificationType, "ID:", req.body?.data?.id, ")");
-     return res.sendStatus(200);
+  let paymentId = paymentIdFromData || paymentIdFromQuery;
+
+  // Log de la información recibida para identificar el pago
+  console.log(`Tipo de notificación recibida: ${notificationType}`);
+  console.log(`ID de pago (desde data.id en body): ${paymentIdFromData}`);
+  console.log(`ID de pago (desde query 'data.id' o 'id'): ${paymentIdFromQuery}`);
+  console.log(`ID de pago a usar: ${paymentId}`);
+
+
+  // Ignorar notificaciones que no sean de pago o no tengan ID
+  // A veces MP envía un webhook de prueba con 'topic: "test"'.
+  if (notificationType !== 'payment' || !paymentId) {
+     console.log("Notificación ignorada o ID de pago no encontrado.");
+     console.log(`--- [${new Date().toISOString()}] FIN Webhook (Ignorado/ID no encontrado) ---`);
+     return res.sendStatus(200); // Responder 200 OK para que MP no reintente
   }
 
   try {
-    const paymentId = req.body.data.id;
-    console.log(`Procesando notificación para Payment ID: ${paymentId}`);
+    console.log(`[TRY] Procesando notificación para Payment ID: ${paymentId}`);
 
     // 1. Obtener detalles completos y verificados del pago desde Mercado Pago
+    console.log(`[TRY] Llamando a paymentClient.get({ id: ${paymentId} })...`);
     const payment = await paymentClient.get({ id: paymentId });
+    console.log(`[TRY] Llamada a paymentClient.get completada.`);
+
 
     if (!payment) {
-        console.error(`No se encontraron detalles en MP para el Payment ID: ${paymentId}`);
-        return res.sendStatus(200);
+        console.error(`[TRY] No se encontraron detalles en MP para el Payment ID: ${paymentId} (Respuesta vacía de SDK?)`);
+        console.log(`--- [${new Date().toISOString()}] FIN Webhook (Error: Pago no encontrado en MP) ---`);
+        return res.sendStatus(200); // Para evitar reintentos si MP no encuentra el pago
     }
 
     const externalReference = payment.external_reference;
     const paymentStatus = payment.status;
-    const preferenceId = payment.preference_id; // Crucial para encontrar el doc en Firestore
+    const preferenceId = payment.preference_id;
 
-    console.log(`Estado verificado para Pago ${paymentId} (Pref ID: ${preferenceId}, Ref Ext: ${externalReference}): ${paymentStatus}`);
+    console.log(`[TRY] Estado verificado para Pago ${paymentId} (Pref ID: ${preferenceId}, Ref Ext: ${externalReference}): ${paymentStatus}`);
 
     if (!preferenceId) {
-        console.error(`ERROR CRÍTICO: Payment ID ${paymentId} no tiene preference_id asociado. No se puede encontrar la transacción en Firestore.`);
+        console.error(`[TRY] ERROR CRÍTICO: Payment ID ${paymentId} no tiene preference_id asociado. No se puede encontrar la transacción en Firestore.`);
+        console.log(`--- [${new Date().toISOString()}] FIN Webhook (Error: Sin preference_id) ---`);
         return res.sendStatus(200);
     }
 
     // 2. Referencia al documento en Firestore
-    // (Se guardó usando preference.id, que es lo que MP devuelve como payment.preference_id)
     const transactionRef = db.collection("transactions").doc(preferenceId);
+    console.log(`[TRY] Obteniendo documento de Firestore: transactions/${preferenceId}`);
     const transactionDoc = await transactionRef.get();
 
     if (!transactionDoc.exists) {
-         console.error(`ERROR CRÍTICO: No se encontró transacción en Firestore con Preference ID: ${preferenceId} (corresponde a Payment ID ${paymentId}, External Ref ${externalReference})`);
+         console.error(`[TRY] ERROR CRÍTICO: No se encontró transacción en Firestore con Preference ID: ${preferenceId} (corresponde a Payment ID ${paymentId}, External Ref ${externalReference})`);
+         console.log(`--- [${new Date().toISOString()}] FIN Webhook (Error: Documento no existe en Firestore) ---`);
          return res.sendStatus(200);
     }
 
-    console.log(`Transacción encontrada en Firestore con Preference ID: ${preferenceId}`);
+    console.log(`[TRY] Transacción encontrada en Firestore con Preference ID: ${preferenceId}.`);
     const currentStatus = transactionDoc.data()?.status;
+    console.log(`[TRY] Estado actual en Firestore: ${currentStatus}, Estado de MP: ${paymentStatus}`);
 
     // 3. Actualizar el documento en Firestore si el estado ha cambiado
     if (currentStatus !== paymentStatus) {
-        console.log(`Actualizando estado de '${currentStatus}' a '${paymentStatus}' para orden con Pref ID ${transactionRef.id} (Ref externa: ${externalReference}).`);
+        console.log(`[TRY] Actualizando estado de '${currentStatus}' a '${paymentStatus}' para orden con Pref ID ${transactionRef.id} (Ref externa: ${externalReference}).`);
         const updateData = {
           mp_payment_id: payment.id,
           status: paymentStatus,
@@ -194,30 +225,43 @@ app.post("/payment-webhook", async (req, res) => {
         };
 
         await transactionRef.update(updateData);
-        console.log(`✅ Actualización en Firestore completada para ${transactionRef.id}. Nuevo estado: ${paymentStatus}`);
+        console.log(`[TRY] ✅ Actualización en Firestore completada para ${transactionRef.id}. Nuevo estado: ${paymentStatus}`);
 
         // 4. Lógica Post-Pago (si fue aprobado y es la primera vez que se procesa como aprobado)
         if (paymentStatus === 'approved') {
             const machineId = externalReference;
-            console.log(`🚀 EJECUTANDO ACCIONES POST-PAGO APROBADO para Pref ${transactionRef.id} (Machine: ${machineId})...`);
+            console.log(`[TRY] 🚀 EJECUTANDO ACCIONES POST-PAGO APROBADO para Pref ${transactionRef.id} (Machine: ${machineId})...`);
             try {
                 // Aquí va tu lógica real para notificar a la máquina vending o similar
-                console.log(`   -> Acción específica para máquina ${machineId} (ej: marcar como lista para dispensar).`);
+                console.log(`[TRY]    -> Acción específica para máquina ${machineId} (ej: marcar como lista para dispensar).`);
                 // Ejemplo: await db.collection('machines').doc(machineId).update({ last_payment_approved: true, dispense_pending: true });
             } catch (postPagoError) {
-                console.error(`Error ejecutando acciones post-pago para ${transactionRef.id}:`, postPagoError);
+                console.error(`[TRY] Error ejecutando acciones post-pago para ${transactionRef.id}:`, postPagoError);
             }
         }
     } else {
-         console.log(`Estado ${paymentStatus} para ${transactionRef.id} ya estaba registrado. No se requiere actualización.`);
+         console.log(`[TRY] Estado ${paymentStatus} para ${transactionRef.id} ya estaba registrado. No se requiere actualización.`);
     }
 
     // 5. Responder 200 OK a Mercado Pago
+    console.log(`[TRY] Enviando respuesta 200 OK a Mercado Pago...`);
     res.sendStatus(200);
+    console.log(`--- [${new Date().toISOString()}] FIN Webhook (Procesado OK) ---`);
 
   } catch (error) {
-    console.error("Error procesando webhook:", error.cause || error.message || error);
-    res.sendStatus(500);
+    console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    console.error("!!!!!!!!    Error en CATCH procesando webhook    !!!!!!!!!");
+    console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    if (error.cause) {
+         console.error("Error Cause:", JSON.stringify(error.cause, null, 2));
+    } else {
+         console.error("Error Object:", error);
+    }
+    console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    const statusCode = error.statusCode || 500;
+    console.log(`[CATCH] Enviando respuesta ${statusCode} a Mercado Pago...`);
+    res.sendStatus(statusCode);
+    console.log(`--- [${new Date().toISOString()}] FIN Webhook (Error en Catch) ---`);
   }
 });
 // --- FIN DEL WEBHOOK CON FIRESTORE ---
