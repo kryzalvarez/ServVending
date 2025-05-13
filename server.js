@@ -11,7 +11,7 @@ const admin = require("firebase-admin"); // Firebase Admin SDK está activo
 // Inicialización de Express
 const app = express();
 
-// Middlewares
+// Middlewaresghh
 app.use(cors()); // Habilita CORS para permitir peticiones del frontend
 app.use(bodyParser.json()); // Parsea cuerpos de petición JSON
 
