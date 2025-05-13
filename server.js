@@ -6,7 +6,7 @@ const express = require("express");
 const { MercadoPagoConfig, Preference, Payment } = require("mercadopago"); // SDK v3 de Mercado Pago
 const cors = require("cors");
 const bodyParser = require("body-parser");
-const admin = require("firebase-admin"); // <<<--- DESCOMENTADO: Firebase Admin SDK
+const admin = require("firebase-admin"); // <<<--- Firebase Admin SDK está activo
 
 // Inicialización de Express
 const app = express();
@@ -43,17 +43,23 @@ try {
   const decodedServiceAccount = Buffer.from(base64EncodedServiceAccount, 'base64').toString('utf-8');
   const serviceAccount = JSON.parse(decodedServiceAccount);
 
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-    // Opcional: Especificar databaseURL si usas Realtime Database además de Firestore
-    // databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
-  });
+  // Evitar reinicializar Firebase si ya existe una app
+  if (admin.apps.length === 0) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      // Opcional: Especificar databaseURL si usas Realtime Database además de Firestore
+      // databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
+    });
+    console.log("Firebase Admin SDK inicializado por primera vez.");
+  } else {
+    console.log("Firebase Admin SDK ya estaba inicializado.");
+  }
 
-  db = admin.firestore(); // <<<--- DESCOMENTADO: Obtener instancia de Firestore
-  console.log("Firebase Admin SDK inicializado correctamente.");
+  db = admin.firestore(); // Obtener instancia de Firestore
+  console.log("Instancia de Firestore obtenida.");
 
 } catch (error) {
-   console.error("ERROR FATAL: No se pudo inicializar Firebase Admin SDK.", error);
+   console.error("ERROR FATAL: No se pudo inicializar Firebase Admin SDK o obtener Firestore.", error);
    process.exit(1);
 }
 // --- FIN SECCIÓN FIREBASE REACTIVADA ---
@@ -68,18 +74,22 @@ app.get("/", (req, res) => {
 
 // Endpoint para crear la preferencia de pago (y obtener init_point)
 app.post("/create-payment", async (req, res) => {
-  console.log("Recibida petición /create-payment:", req.body);
+  console.log("Recibida petición /create-payment:", JSON.stringify(req.body, null, 2));
   try {
     const { machine_id, items } = req.body;
 
     if (!machine_id || !items || !Array.isArray(items) || items.length === 0) {
+      console.warn("Petición /create-payment rechazada por datos faltantes:", { machine_id, items_type: typeof items, items_length: items?.length });
       return res.status(400).json({ error: "Faltan datos requeridos: machine_id y/o items válidos." });
     }
 
-    // --- NUEVA ADICIÓN DE LOG AQUÍ ---
+    // Log crucial para verificar la URL de notificación
     const constructedNotificationUrl = `${process.env.BACKEND_URL}/payment-webhook`;
     console.log(">>> URL DE NOTIFICACIÓN QUE SE ENVIARÁ A MERCADO PAGO:", constructedNotificationUrl);
-    // --- FIN NUEVA ADICIÓN DE LOG ---
+    if (!process.env.BACKEND_URL) {
+        console.error("ALERTA: process.env.BACKEND_URL no está definida. La notification_url será inválida.");
+    }
+
 
     const preferenceBody = {
       items: items.map(item => ({
@@ -104,19 +114,15 @@ app.post("/create-payment", async (req, res) => {
     const preference = await preferenceClient.create({ body: preferenceBody });
     console.log("Preferencia creada exitosamente por MP. ID de Preferencia:", preference.id);
 
-    // --- GUARDADO EN FIRESTORE REACTIVADO ---
     const transactionData = {
       machine_id: machine_id,
       status: "pending", // Estado inicial
-      items: items, // Guardar los items de esta transacción
-      mp_preference_id: preference.id, // Guardar el ID de la preferencia
+      items: items,
+      mp_preference_id: preference.id,
       created_at: admin.firestore.FieldValue.serverTimestamp()
-      // Considera guardar el monto total calculado aquí para validaciones
     };
-    // Usar preference.id como ID del documento en Firestore
     await db.collection("transactions").doc(preference.id).set(transactionData);
     console.log(`Transacción inicial guardada en Firestore con ID: ${preference.id}`);
-    // --- FIN GUARDADO EN FIRESTORE REACTIVADO ---
 
     res.json({
       id: preference.id,
@@ -126,7 +132,6 @@ app.post("/create-payment", async (req, res) => {
 
   } catch (error) {
     console.error("Error al crear preferencia de pago:", error.cause || error.message || error);
-    // Para errores del SDK de Mercado Pago, 'error.cause' a menudo tiene más detalles.
     const errorDetails = error.cause ? JSON.stringify(error.cause, null, 2) : error.message;
     res.status(500).json({ error: "No se pudo crear la preferencia de pago.", details: errorDetails });
   }
@@ -134,46 +139,36 @@ app.post("/create-payment", async (req, res) => {
 
 // --- WEBHOOK CON LÓGICA DE FIRESTORE REACTIVADA Y AJUSTADA ---
 app.post("/payment-webhook", async (req, res) => {
-  // Log de entrada al webhook
   console.log(`\n--- [${new Date().toISOString()}] INICIO Webhook /payment-webhook ---`);
   console.log("Headers del Webhook:", JSON.stringify(req.headers, null, 2));
   console.log("Cuerpo del Webhook (parseado):", JSON.stringify(req.body, null, 2));
 
-  // Mercado Pago puede usar 'type' o 'topic' para el tipo de evento y a veces envía query params
-  const notificationType = req.body.type || req.query.type; // Revisar body primero, luego query
-  const paymentIdFromData = req.body.data?.id; // Del cuerpo JSON
-  const paymentIdFromQuery = req.query['data.id'] || req.query.id; // De query params (ej. data.id=123 o id=123)
-
+  const notificationType = req.body.type || req.query.type;
+  const paymentIdFromData = req.body.data?.id;
+  const paymentIdFromQuery = req.query['data.id'] || req.query.id;
   let paymentId = paymentIdFromData || paymentIdFromQuery;
 
-  // Log de la información recibida para identificar el pago
   console.log(`Tipo de notificación recibida: ${notificationType}`);
   console.log(`ID de pago (desde data.id en body): ${paymentIdFromData}`);
   console.log(`ID de pago (desde query 'data.id' o 'id'): ${paymentIdFromQuery}`);
   console.log(`ID de pago a usar: ${paymentId}`);
 
-
-  // Ignorar notificaciones que no sean de pago o no tengan ID
-  // A veces MP envía un webhook de prueba con 'topic: "test"'.
   if (notificationType !== 'payment' || !paymentId) {
      console.log("Notificación ignorada o ID de pago no encontrado.");
      console.log(`--- [${new Date().toISOString()}] FIN Webhook (Ignorado/ID no encontrado) ---`);
-     return res.sendStatus(200); // Responder 200 OK para que MP no reintente
+     return res.sendStatus(200);
   }
 
   try {
     console.log(`[TRY] Procesando notificación para Payment ID: ${paymentId}`);
-
-    // 1. Obtener detalles completos y verificados del pago desde Mercado Pago
     console.log(`[TRY] Llamando a paymentClient.get({ id: ${paymentId} })...`);
     const payment = await paymentClient.get({ id: paymentId });
     console.log(`[TRY] Llamada a paymentClient.get completada.`);
 
-
     if (!payment) {
         console.error(`[TRY] No se encontraron detalles en MP para el Payment ID: ${paymentId} (Respuesta vacía de SDK?)`);
         console.log(`--- [${new Date().toISOString()}] FIN Webhook (Error: Pago no encontrado en MP) ---`);
-        return res.sendStatus(200); // Para evitar reintentos si MP no encuentra el pago
+        return res.sendStatus(200);
     }
 
     const externalReference = payment.external_reference;
@@ -182,13 +177,17 @@ app.post("/payment-webhook", async (req, res) => {
 
     console.log(`[TRY] Estado verificado para Pago ${paymentId} (Pref ID: ${preferenceId}, Ref Ext: ${externalReference}): ${paymentStatus}`);
 
+    if (!db) { // Chequeo por si db no se inicializó (aunque debería haber salido antes)
+        console.error("[TRY] ERROR CRÍTICO: Instancia de Firestore 'db' no está disponible.");
+        return res.status(500).send("Error interno del servidor: Firestore no disponible.");
+    }
+
     if (!preferenceId) {
         console.error(`[TRY] ERROR CRÍTICO: Payment ID ${paymentId} no tiene preference_id asociado. No se puede encontrar la transacción en Firestore.`);
         console.log(`--- [${new Date().toISOString()}] FIN Webhook (Error: Sin preference_id) ---`);
         return res.sendStatus(200);
     }
 
-    // 2. Referencia al documento en Firestore
     const transactionRef = db.collection("transactions").doc(preferenceId);
     console.log(`[TRY] Obteniendo documento de Firestore: transactions/${preferenceId}`);
     const transactionDoc = await transactionRef.get();
@@ -203,7 +202,6 @@ app.post("/payment-webhook", async (req, res) => {
     const currentStatus = transactionDoc.data()?.status;
     console.log(`[TRY] Estado actual en Firestore: ${currentStatus}, Estado de MP: ${paymentStatus}`);
 
-    // 3. Actualizar el documento en Firestore si el estado ha cambiado
     if (currentStatus !== paymentStatus) {
         console.log(`[TRY] Actualizando estado de '${currentStatus}' a '${paymentStatus}' para orden con Pref ID ${transactionRef.id} (Ref externa: ${externalReference}).`);
         const updateData = {
@@ -227,14 +225,11 @@ app.post("/payment-webhook", async (req, res) => {
         await transactionRef.update(updateData);
         console.log(`[TRY] ✅ Actualización en Firestore completada para ${transactionRef.id}. Nuevo estado: ${paymentStatus}`);
 
-        // 4. Lógica Post-Pago (si fue aprobado y es la primera vez que se procesa como aprobado)
         if (paymentStatus === 'approved') {
             const machineId = externalReference;
             console.log(`[TRY] 🚀 EJECUTANDO ACCIONES POST-PAGO APROBADO para Pref ${transactionRef.id} (Machine: ${machineId})...`);
             try {
-                // Aquí va tu lógica real para notificar a la máquina vending o similar
                 console.log(`[TRY]    -> Acción específica para máquina ${machineId} (ej: marcar como lista para dispensar).`);
-                // Ejemplo: await db.collection('machines').doc(machineId).update({ last_payment_approved: true, dispense_pending: true });
             } catch (postPagoError) {
                 console.error(`[TRY] Error ejecutando acciones post-pago para ${transactionRef.id}:`, postPagoError);
             }
@@ -243,7 +238,6 @@ app.post("/payment-webhook", async (req, res) => {
          console.log(`[TRY] Estado ${paymentStatus} para ${transactionRef.id} ya estaba registrado. No se requiere actualización.`);
     }
 
-    // 5. Responder 200 OK a Mercado Pago
     console.log(`[TRY] Enviando respuesta 200 OK a Mercado Pago...`);
     res.sendStatus(200);
     console.log(`--- [${new Date().toISOString()}] FIN Webhook (Procesado OK) ---`);
@@ -266,10 +260,12 @@ app.post("/payment-webhook", async (req, res) => {
 });
 // --- FIN DEL WEBHOOK CON FIRESTORE ---
 
-
 // --- Iniciar el Servidor ---
 app.listen(PORT, () => {
   console.log(`Servidor Express escuchando en puerto ${PORT}`);
-  console.log(`URL Base (asegúrate que BACKEND_URL sea pública para webhooks): ${process.env.BACKEND_URL || 'URL NO DEFINIDA'}`);
+  console.log(`URL Base (asegúrate que BACKEND_URL sea pública para webhooks): ${process.env.BACKEND_URL || 'URL NO DEFINIDA -> ¡WEBHOOKS FALLARÁN!'}`);
+  if (!process.env.MERCADOPAGO_ACCESS_TOKEN) console.error("ALERTA: MERCADOPAGO_ACCESS_TOKEN no está definido.");
+  if (!process.env.BASE64_ENCODED_SERVICE_ACCOUNT) console.error("ALERTA: BASE64_ENCODED_SERVICE_ACCOUNT no está definido (Firestore no funcionará).");
+  if (!process.env.FRONTEND_URL) console.warn("ADVERTENCIA: FRONTEND_URL no está definido (back_urls podrían fallar).");
   console.log("INFO: Interacción con Firestore HABILITADA en este código.");
 });
