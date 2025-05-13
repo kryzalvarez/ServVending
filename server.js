@@ -146,6 +146,37 @@ app.post("/create-payment", async (req, res) => {
   }
 });
 
+// --- NUEVO ENDPOINT GET /payment-status PARA POLLING ---
+app.get("/payment-status", (req, res) => {
+  const preferenceId = req.query.preference_id; // Recibimos el ID como query parameter
+
+  if (!preferenceId) {
+    return res.status(400).json({ error: "Falta el parámetro 'preference_id'." });
+  }
+  console.log(`\n--- [${new Date().toISOString()}] INICIO GET /payment-status ---`);
+  console.log(`Solicitud de estado (polling) para preference_id: ${preferenceId}`);
+
+  const transaction = paymentStatuses[preferenceId]; // paymentStatuses es tu objeto en memoria
+
+  if (!transaction) {
+    console.log(`Estado para ${preferenceId} NO encontrado en 'paymentStatuses'. Devolviendo not_found.`);
+    return res.status(404).json({ // Es importante que devuelva JSON también en el error 404 que manejas
+        preference_id: preferenceId,
+        status: "not_found", 
+        message: "Transacción no encontrada. Puede que aún no se haya creado o el ID sea incorrecto/antiguo."
+    });
+  }
+
+  console.log(`Devolviendo estado para ${preferenceId}: ${transaction.status}`);
+  res.json({ // La respuesta DEBE ser JSON
+    preference_id: preferenceId,
+    status: transaction.status,
+    machine_id: transaction.machine_id
+  });
+  console.log(`--- [${new Date().toISOString()}] FIN GET /payment-status ---`);
+});
+// --- FIN ENDPOINT GET /payment-status ---
+
 // --- Endpoint de prueba simple ---
 app.post("/test-webhook", (req, res) => {
   console.log(`\n--- [${new Date().toISOString()}] INICIO Webhook /test-webhook (RUTA DE PRUEBA SIMPLIFICADA) ---`);
